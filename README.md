@@ -95,17 +95,6 @@ python3 -m venv .venv
 
 They should use their own Instagram account and session.
 
-## Privacy And Local Files
-
-Do not commit:
-
-- `.env` files
-- Instagram passwords
-- Instaloader session files
-- Generated files in `output/`
-
-`.gitignore` excludes common local credential/session/output artifacts.
-
 ## Practical Limits
 
 - Instagram may rate limit, challenge, or block requests.
