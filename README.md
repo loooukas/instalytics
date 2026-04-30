@@ -85,5 +85,6 @@ Each post includes a stable Instagram `shortcode`, which is usually the best joi
 
 - Instagram may rate limit or challenge requests, especially for large exports.
 - Comments can be slow and may require login.
+- If Instagram rejects the comments endpoint, the export continues and leaves `comments` empty for affected posts. Use `--max-comments 0` when you only need profile and post-level metrics.
 - Public share counts are not available through this script.
 - Media URLs are remote Instagram CDN URLs and may expire.

@@ -15,6 +15,7 @@ import os
 import sys
 import time
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlparse
@@ -267,7 +268,14 @@ def get_profile(loader: Instaloader, username: str) -> Profile:
     try:
         return Profile.from_username(loader.context, username)
     except ProfileNotExistsException as exc:
+        if loader.context.is_logged_in:
+            profile = get_profile_from_mobile_endpoint(loader, username)
+            if profile:
+                return profile
         if not loader.context.is_logged_in and prompt_for_saved_session(loader):
+            profile = get_profile_from_mobile_endpoint(loader, username)
+            if profile:
+                return profile
             return Profile.from_username(loader.context, username)
         raise SystemExit(
             f"Could not load @{username}.\n"
@@ -278,7 +286,14 @@ def get_profile(loader: Instaloader, username: str) -> Profile:
             f"--max-posts 25 --max-comments 50"
         ) from exc
     except QueryReturnedForbiddenException as exc:
+        if loader.context.is_logged_in:
+            profile = get_profile_from_mobile_endpoint(loader, username)
+            if profile:
+                return profile
         if not loader.context.is_logged_in and prompt_for_saved_session(loader):
+            profile = get_profile_from_mobile_endpoint(loader, username)
+            if profile:
+                return profile
             return Profile.from_username(loader.context, username)
         raise SystemExit(
             f"Instagram returned 403 Forbidden while loading @{username}.\n"
@@ -289,7 +304,14 @@ def get_profile(loader: Instaloader, username: str) -> Profile:
         ) from exc
     except ConnectionException as exc:
         message = str(exc)
+        if loader.context.is_logged_in:
+            profile = get_profile_from_mobile_endpoint(loader, username)
+            if profile:
+                return profile
         if "403 Forbidden" in message and not loader.context.is_logged_in and prompt_for_saved_session(loader):
+            profile = get_profile_from_mobile_endpoint(loader, username)
+            if profile:
+                return profile
             return Profile.from_username(loader.context, username)
         if "403 Forbidden" in message:
             raise SystemExit(
@@ -312,6 +334,22 @@ def get_profile(loader: Instaloader, username: str) -> Profile:
         ) from exc
     except LoginException as exc:
         raise SystemExit(f"Instagram login/session failed: {exc}") from exc
+
+
+def get_profile_from_mobile_endpoint(loader: Instaloader, username: str) -> Profile | None:
+    try:
+        response = loader.context.get_iphone_json(
+            "api/v1/users/web_profile_info/",
+            {"username": username},
+        )
+    except ConnectionException as exc:
+        print(f"Warning: mobile profile fallback failed for @{username}: {exc}", file=sys.stderr)
+        return None
+
+    user = response.get("data", {}).get("user")
+    if not user:
+        return None
+    return Profile(loader.context, user)
 
 
 def collect_media_urls(post: Post) -> list[str]:
@@ -358,6 +396,186 @@ def collect_comments(post: Post, max_comments: int) -> list[CommentRecord]:
     except ConnectionException as exc:
         print(f"Warning: connection error reading comments for {post.shortcode}: {exc}", file=sys.stderr)
     return comments
+
+
+def collect_mobile_media_urls(item: dict[str, Any]) -> tuple[str | None, str | None, list[str]]:
+    media_urls: list[str] = []
+    photo_url: str | None = None
+    video_url: str | None = None
+
+    def best_image_url(media: dict[str, Any]) -> str | None:
+        candidates = media.get("image_versions2", {}).get("candidates", [])
+        if not candidates:
+            return media.get("display_uri")
+        best = max(candidates, key=lambda candidate: candidate.get("width", 0) * candidate.get("height", 0))
+        return best.get("url")
+
+    def best_video_url(media: dict[str, Any]) -> str | None:
+        versions = media.get("video_versions", [])
+        if not versions:
+            return None
+        best = max(versions, key=lambda candidate: candidate.get("width", 0) * candidate.get("height", 0))
+        return best.get("url")
+
+    media_items = item.get("carousel_media") or [item]
+    for media in media_items:
+        image_url = best_image_url(media)
+        if image_url:
+            media_urls.append(image_url)
+            if photo_url is None:
+                photo_url = image_url
+
+        candidate_video_url = best_video_url(media)
+        if candidate_video_url:
+            media_urls.append(candidate_video_url)
+            if video_url is None:
+                video_url = candidate_video_url
+
+    return photo_url, video_url, media_urls
+
+
+def collect_mobile_comments(
+    loader: Instaloader,
+    item: dict[str, Any],
+    max_comments: int,
+    comment_state: dict[str, bool],
+) -> list[CommentRecord]:
+    if max_comments <= 0 or comment_state.get("disabled", False):
+        return []
+
+    media_id = str(item.get("id") or item.get("pk") or "")
+    if not media_id:
+        return []
+
+    comments: list[CommentRecord] = []
+    min_id: str | None = None
+    while len(comments) < max_comments:
+        params = {"can_support_threading": "true"}
+        if min_id:
+            params["min_id"] = min_id
+
+        try:
+            response = loader.context.get_iphone_json(f"api/v1/media/{media_id}/comments/", params)
+        except ConnectionException as exc:
+            print(
+                f"Warning: comments unavailable for {item.get('code', media_id)}: {exc}. "
+                "Skipping comments for the rest of this run.",
+                file=sys.stderr,
+            )
+            comment_state["disabled"] = True
+            return comments
+
+        for comment in response.get("comments", []):
+            created_at = comment.get("created_at_utc") or comment.get("created_at")
+            comments.append(
+                CommentRecord(
+                    id=comment.get("pk"),
+                    owner_username=comment.get("user", {}).get("username"),
+                    text=comment.get("text", ""),
+                    created_at_utc=datetime.fromtimestamp(created_at, timezone.utc).isoformat()
+                    if created_at
+                    else None,
+                    likes_count=comment.get("comment_like_count") or comment.get("like_count"),
+                )
+            )
+            if len(comments) >= max_comments:
+                break
+
+        min_id = response.get("next_min_id")
+        if not min_id or not response.get("has_more_comments"):
+            break
+
+    return comments
+
+
+def mobile_item_to_record(
+    loader: Instaloader,
+    item: dict[str, Any],
+    max_comments: int,
+    comment_state: dict[str, bool],
+) -> PostRecord:
+    photo_url, video_url, media_urls = collect_mobile_media_urls(item)
+    caption = item.get("caption") or {}
+    taken_at = item.get("taken_at")
+    media_type = item.get("media_type")
+    typename = {
+        1: "GraphImage",
+        2: "GraphVideo",
+        8: "GraphSidecar",
+    }.get(media_type, str(media_type or "Unknown"))
+
+    return PostRecord(
+        shortcode=item.get("code", ""),
+        url=f"https://www.instagram.com/p/{item.get('code', '')}/",
+        date_utc=datetime.fromtimestamp(taken_at, timezone.utc).isoformat() if taken_at else "",
+        typename=typename,
+        is_video=media_type == 2 or bool(video_url),
+        caption=caption.get("text") if isinstance(caption, dict) else None,
+        like_count=item.get("like_count"),
+        comment_count=item.get("comment_count"),
+        share_count=item.get("share_count"),
+        photo_url=photo_url,
+        video_url=video_url,
+        media_urls=media_urls,
+        comments=collect_mobile_comments(
+            loader,
+            item,
+            max_comments=max_comments,
+            comment_state=comment_state,
+        ),
+    )
+
+
+def collect_mobile_posts(
+    loader: Instaloader,
+    profile: Profile,
+    max_posts: int | None,
+    max_comments: int,
+    sleep_seconds: float,
+) -> list[PostRecord]:
+    posts: list[PostRecord] = []
+    max_id: str | None = None
+    comment_state = {"disabled": False}
+
+    while max_posts is None or len(posts) < max_posts:
+        remaining = 12 if max_posts is None else max(1, min(12, max_posts - len(posts)))
+        params = {"count": str(remaining)}
+        if max_id:
+            params["max_id"] = max_id
+
+        try:
+            response = loader.context.get_iphone_json(f"api/v1/feed/user/{profile.userid}/", params)
+        except ConnectionException as exc:
+            raise SystemExit(
+                f"Could not load posts for @{profile.username} through Instagram's mobile feed endpoint.\n"
+                f"Details: {exc}\n"
+                "Wait a few minutes before retrying, or rerun with a larger --sleep value."
+            ) from exc
+
+        items = response.get("items", [])
+        if not items:
+            break
+
+        for item in items:
+            if max_posts is not None and len(posts) >= max_posts:
+                break
+            print(f"Exporting post {len(posts) + 1}: {item.get('code')}", file=sys.stderr)
+            posts.append(
+                mobile_item_to_record(
+                    loader,
+                    item,
+                    max_comments=max_comments,
+                    comment_state=comment_state,
+                )
+            )
+            if sleep_seconds > 0:
+                time.sleep(sleep_seconds)
+
+        max_id = response.get("next_max_id")
+        if not response.get("more_available") or not max_id:
+            break
+
+    return posts
 
 
 def profile_to_record(profile: Profile) -> ProfileRecord:
@@ -482,14 +700,23 @@ def export_profile(args: argparse.Namespace) -> tuple[ProfileRecord, list[PostRe
             "Use an authorized account that follows it, or choose a public profile."
         )
 
-    posts: list[PostRecord] = []
-    for index, post in enumerate(profile.get_posts(), start=1):
-        if args.max_posts is not None and len(posts) >= args.max_posts:
-            break
-        print(f"Exporting post {index}: {post.shortcode}", file=sys.stderr)
-        posts.append(post_to_record(post, max_comments=args.max_comments))
-        if args.sleep > 0:
-            time.sleep(args.sleep)
+    if loader.context.is_logged_in:
+        posts = collect_mobile_posts(
+            loader,
+            profile,
+            max_posts=args.max_posts,
+            max_comments=args.max_comments,
+            sleep_seconds=args.sleep,
+        )
+    else:
+        posts = []
+        for index, post in enumerate(profile.get_posts(), start=1):
+            if args.max_posts is not None and len(posts) >= args.max_posts:
+                break
+            print(f"Exporting post {index}: {post.shortcode}", file=sys.stderr)
+            posts.append(post_to_record(post, max_comments=args.max_comments))
+            if args.sleep > 0:
+                time.sleep(args.sleep)
 
     return profile_record, posts
 
