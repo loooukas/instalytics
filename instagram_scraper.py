@@ -21,14 +21,28 @@ from urllib.parse import urlparse
 
 try:
     import instaloader
-    from instaloader import ConnectionException, Instaloader, LoginRequiredException, Profile, Post
+    from instaloader import (
+        ConnectionException,
+        Instaloader,
+        LoginException,
+        LoginRequiredException,
+        Profile,
+        ProfileNotExistsException,
+        Post,
+        QueryReturnedForbiddenException,
+        TooManyRequestsException,
+    )
 except ImportError:  # pragma: no cover - handled at runtime for friendlier CLI output
     instaloader = None  # type: ignore[assignment]
     ConnectionException = Exception  # type: ignore[assignment,misc]
+    LoginException = Exception  # type: ignore[assignment,misc]
     LoginRequiredException = Exception  # type: ignore[assignment,misc]
     Instaloader = object  # type: ignore[assignment,misc]
     Profile = object  # type: ignore[assignment,misc]
+    ProfileNotExistsException = Exception  # type: ignore[assignment,misc]
     Post = object  # type: ignore[assignment,misc]
+    QueryReturnedForbiddenException = Exception  # type: ignore[assignment,misc]
+    TooManyRequestsException = Exception  # type: ignore[assignment,misc]
 
 
 @dataclass
@@ -76,6 +90,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "profile",
+        nargs="?",
         help="Instagram profile URL, @username, or username to export.",
     )
     parser.add_argument(
@@ -154,6 +169,16 @@ def parse_profile_input(value: str) -> str:
     return raw_value.lstrip("@").rstrip("/")
 
 
+def get_profile_input(args: argparse.Namespace) -> str:
+    if args.profile:
+        return args.profile
+
+    try:
+        return input("Instagram profile link, @username, or username: ")
+    except EOFError as exc:
+        raise SystemExit("No profile input provided.") from exc
+
+
 def require_instaloader() -> None:
     if instaloader is None:
         raise SystemExit(
@@ -175,22 +200,29 @@ def make_loader() -> Instaloader:
     )
 
 
+def load_saved_session(loader: Instaloader, session_user: str) -> bool:
+    try:
+        loader.load_session_from_file(session_user)
+    except FileNotFoundError:
+        return False
+    print(f"Loaded Instaloader session for {session_user}", file=sys.stderr)
+    return True
+
+
 def login_if_requested(loader: Instaloader, args: argparse.Namespace) -> None:
     if not args.login and not args.session_user:
         return
 
     session_user = args.session_user or os.getenv("IG_USERNAME")
     if session_user:
-        try:
-            loader.load_session_from_file(session_user)
-            print(f"Loaded Instaloader session for {session_user}", file=sys.stderr)
+        if load_saved_session(loader, session_user):
             return
-        except FileNotFoundError:
-            if args.session_user and not args.login:
-                raise SystemExit(
-                    f"No saved Instaloader session found for {args.session_user}. "
-                    "Run `instaloader --login YOUR_USERNAME` first, or provide IG_USERNAME/IG_PASSWORD."
-                )
+        if args.session_user and not args.login:
+            raise SystemExit(
+                f"No saved Instaloader session found for {args.session_user}. "
+                "Run `.venv/bin/instaloader --login YOUR_USERNAME` first, "
+                "or provide IG_USERNAME/IG_PASSWORD."
+            )
 
     username = os.getenv("IG_USERNAME")
     password = os.getenv("IG_PASSWORD")
@@ -200,6 +232,86 @@ def login_if_requested(loader: Instaloader, args: argparse.Namespace) -> None:
         )
     loader.login(username, password)
     print(f"Logged in as {username}", file=sys.stderr)
+
+
+def prompt_for_saved_session(loader: Instaloader) -> bool:
+    if not sys.stdin.isatty():
+        return False
+
+    print(
+        "\nInstagram blocked anonymous profile access or returned a misleading "
+        "'profile does not exist' response.",
+        file=sys.stderr,
+    )
+    session_user = input(
+        "Enter your Instagram username for a saved Instaloader session, "
+        "or press Enter to stop: "
+    ).strip()
+    if not session_user:
+        return False
+
+    if load_saved_session(loader, session_user):
+        return True
+
+    raise SystemExit(
+        f"No saved Instaloader session found for {session_user}.\n"
+        f"Create one first with:\n"
+        f"  .venv/bin/instaloader --login {session_user}\n"
+        f"Then rerun this script with:\n"
+        f"  .venv/bin/python instagram_scraper.py --session-user {session_user} "
+        f"--max-posts 25 --max-comments 50"
+    )
+
+
+def get_profile(loader: Instaloader, username: str) -> Profile:
+    try:
+        return Profile.from_username(loader.context, username)
+    except ProfileNotExistsException as exc:
+        if not loader.context.is_logged_in and prompt_for_saved_session(loader):
+            return Profile.from_username(loader.context, username)
+        raise SystemExit(
+            f"Could not load @{username}.\n"
+            "Instagram may have blocked anonymous scraping, or the username may be unavailable. "
+            "If the account exists, create/use a saved login session:\n"
+            f"  .venv/bin/instaloader --login YOUR_INSTAGRAM_USERNAME\n"
+            f"  .venv/bin/python instagram_scraper.py --session-user YOUR_INSTAGRAM_USERNAME "
+            f"--max-posts 25 --max-comments 50"
+        ) from exc
+    except QueryReturnedForbiddenException as exc:
+        if not loader.context.is_logged_in and prompt_for_saved_session(loader):
+            return Profile.from_username(loader.context, username)
+        raise SystemExit(
+            f"Instagram returned 403 Forbidden while loading @{username}.\n"
+            "That usually means anonymous access is blocked. Use a saved session:\n"
+            f"  .venv/bin/instaloader --login YOUR_INSTAGRAM_USERNAME\n"
+            f"  .venv/bin/python instagram_scraper.py --session-user YOUR_INSTAGRAM_USERNAME "
+            f"--max-posts 25 --max-comments 50"
+        ) from exc
+    except ConnectionException as exc:
+        message = str(exc)
+        if "403 Forbidden" in message and not loader.context.is_logged_in and prompt_for_saved_session(loader):
+            return Profile.from_username(loader.context, username)
+        if "403 Forbidden" in message:
+            raise SystemExit(
+                f"Instagram returned 403 Forbidden while loading @{username}.\n"
+                "That usually means Instagram blocked the request. Use a saved session:\n"
+                f"  .venv/bin/instaloader --login YOUR_INSTAGRAM_USERNAME\n"
+                f"  .venv/bin/python instagram_scraper.py --session-user YOUR_INSTAGRAM_USERNAME "
+                f"--max-posts 25 --max-comments 50"
+            ) from exc
+        raise SystemExit(
+            f"Could not reach Instagram while loading @{username}.\n"
+            f"Details: {message}\n"
+            "Check your network connection, then retry. If Instagram blocks anonymous access, "
+            "use --session-user with a saved Instaloader session."
+        ) from exc
+    except TooManyRequestsException as exc:
+        raise SystemExit(
+            "Instagram rate limited the requests. Wait before retrying, and use "
+            "--session-user plus a higher --sleep value for larger exports."
+        ) from exc
+    except LoginException as exc:
+        raise SystemExit(f"Instagram login/session failed: {exc}") from exc
 
 
 def collect_media_urls(post: Post) -> list[str]:
@@ -360,8 +472,8 @@ def export_profile(args: argparse.Namespace) -> tuple[ProfileRecord, list[PostRe
     loader = make_loader()
     login_if_requested(loader, args)
 
-    username = parse_profile_input(args.profile)
-    profile = Profile.from_username(loader.context, username)
+    username = parse_profile_input(get_profile_input(args))
+    profile = get_profile(loader, username)
     profile_record = profile_to_record(profile)
 
     if profile.is_private and not profile.followed_by_viewer:

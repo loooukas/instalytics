@@ -24,18 +24,24 @@ python3 -m venv .venv
 
 ## Basic Usage
 
-Export the latest 25 accessible posts from a profile link with up to 50 comments per post:
+Run the script, then paste the Instagram profile link when prompted:
 
 ```bash
-.venv/bin/python instagram_scraper.py "https://www.instagram.com/instagram/" --max-posts 25 --max-comments 50 --output output/instagram.json --csv-output output/instagram.csv
+.venv/bin/python instagram_scraper.py --max-posts 25 --max-comments 50 --output output/instagram.json --csv-output output/instagram.csv
 ```
 
-You can also pass `@instagram` or `instagram` instead of the full link.
+At the prompt, enter a full profile link like `https://www.instagram.com/instagram/`. You can also enter `@instagram` or `instagram`.
 
-Export all accessible posts from a profile link, skipping comments:
+Export all accessible posts, skipping comments:
 
 ```bash
-.venv/bin/python instagram_scraper.py "https://www.instagram.com/instagram/" --max-comments 0 --output output/instagram.json
+.venv/bin/python instagram_scraper.py --max-comments 0 --output output/instagram.json
+```
+
+You can still pass the profile directly if you want a one-line command:
+
+```bash
+.venv/bin/python instagram_scraper.py "https://www.instagram.com/instagram/" --max-posts 25
 ```
 
 ## Login
@@ -46,15 +52,17 @@ Recommended session flow:
 
 ```bash
 .venv/bin/instaloader --login YOUR_INSTAGRAM_USERNAME
-.venv/bin/python instagram_scraper.py "https://www.instagram.com/target_username/" --session-user YOUR_INSTAGRAM_USERNAME --max-posts 25
+.venv/bin/python instagram_scraper.py --session-user YOUR_INSTAGRAM_USERNAME --max-posts 25
 ```
+
+If Instagram returns `403 Forbidden` or claims a profile does not exist even though it does, anonymous access is being blocked. Create a saved session with the command above, then rerun with `--session-user`.
 
 Environment-variable login also works:
 
 ```bash
 export IG_USERNAME="your_username"
 export IG_PASSWORD="your_password"
-.venv/bin/python instagram_scraper.py "https://www.instagram.com/target_username/" --login --max-posts 25
+.venv/bin/python instagram_scraper.py --login --max-posts 25
 ```
 
 The script will not access private profiles unless the logged-in account is already authorized to view them.
