@@ -4,3 +4,9 @@ __pycache__/
 *.pyc
 output/
 .DS_Store
+.env
+.env.*
+session-*
+*.session
+*.sqlite
+*.sqlite3

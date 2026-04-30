@@ -1,19 +1,21 @@
-# Instagram Profile Exporter
+# instalytics
 
-Exports accessible Instagram profile metadata and post data into JSON, with an optional flattened CSV for analysis.
+`instalytics` is a small Python utility for exporting Instagram profile and post information for a given user using your own Instagram account.
 
-Use this only for accounts and data you are authorized to collect. The script uses normal `instaloader` access and does not bypass private profiles, login challenges, rate limits, or unavailable metrics.
+It was created for use in class `ITMG 494`.
+
+The exporter writes accessible profile and post metadata to JSON, with an optional flattened CSV that is easier to combine with other data for analysis.
 
 ## What It Exports
 
 - Profile username, full name, bio, external URL, follower count, following count, media count, verified/private flags
 - Post shortcode, permalink, UTC date, media type, caption/description
-- Post photo URL, video URL when present, and all carousel media URLs
+- Post photo URL, video URL when present, and carousel media URLs
 - Like count and comment count
-- Comments, including commenter username, text, timestamp, and comment like count
-- `share_count` as `null`
+- Comments when Instagram allows the comments endpoint for your account/session
+- `share_count` as `null` when Instagram does not expose it
 
-Instagram does not expose public per-post share counts through this access path, so `share_count` is intentionally `null`. If your own Instagram data export contains share metrics, merge those later by shortcode or permalink.
+Use this only for accounts and data you are authorized to collect. The script uses normal `instaloader` access with your own account session. It does not bypass private profiles, login challenges, rate limits, or unavailable metrics.
 
 ## Setup
 
@@ -22,52 +24,47 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 ```
 
-## Basic Usage
+This repository does not include Instagram credentials, cookies, or session files. Each user creates their own local Instagram session.
 
-Run the script, then paste the Instagram profile link when prompted:
-
-```bash
-.venv/bin/python instagram_scraper.py --max-posts 25 --max-comments 50 --output output/instagram.json --csv-output output/instagram.csv
-```
-
-At the prompt, enter a full profile link like `https://www.instagram.com/instagram/`. You can also enter `@instagram` or `instagram`.
-
-Export all accessible posts, skipping comments:
-
-```bash
-.venv/bin/python instagram_scraper.py --max-comments 0 --output output/instagram.json
-```
-
-You can still pass the profile directly if you want a one-line command:
-
-```bash
-.venv/bin/python instagram_scraper.py "https://www.instagram.com/instagram/" --max-posts 25
-```
-
-## Login
-
-Some metadata and comments require an authenticated Instagram session.
-
-Recommended session flow:
+## Create Your Instagram Session
 
 ```bash
 .venv/bin/instaloader --login YOUR_INSTAGRAM_USERNAME
-.venv/bin/python instagram_scraper.py --session-user YOUR_INSTAGRAM_USERNAME --max-posts 25
 ```
 
-If Instagram returns `403 Forbidden` or claims a profile does not exist even though it does, anonymous access is being blocked. Create a saved session with the command above, then rerun with `--session-user`.
+This prompts for your Instagram password and saves an Instaloader session under your user config directory, usually:
 
-Environment-variable login also works:
+```text
+~/.config/instaloader/session-YOUR_INSTAGRAM_USERNAME
+```
+
+That session is not saved in this project folder.
+
+## Run The Exporter
+
+Run the script, then paste the target Instagram profile link when prompted:
 
 ```bash
-export IG_USERNAME="your_username"
-export IG_PASSWORD="your_password"
-.venv/bin/python instagram_scraper.py --login --max-posts 25
+.venv/bin/python instagram_scraper.py --session-user YOUR_INSTAGRAM_USERNAME --max-posts 25 --max-comments 0 --output output/instagram.json --csv-output output/instagram.csv
 ```
 
-The script will not access private profiles unless the logged-in account is already authorized to view them.
+At the prompt, enter a profile link like:
 
-## Output Shape
+```text
+https://www.instagram.com/instagram/
+```
+
+You can also enter `@instagram` or `instagram`.
+
+You can request comments too:
+
+```bash
+.venv/bin/python instagram_scraper.py --session-user YOUR_INSTAGRAM_USERNAME --max-posts 25 --max-comments 50 --output output/instagram.json --csv-output output/instagram.csv
+```
+
+If Instagram rejects the comments endpoint, the export continues and leaves `comments` empty for affected posts. For class analysis, `--max-comments 0` is usually faster and more reliable if you only need post-level metrics.
+
+## Output
 
 The JSON output has this top-level structure:
 
@@ -79,12 +76,40 @@ The JSON output has this top-level structure:
 }
 ```
 
+The CSV output has one row per post and repeats profile-level fields on each row so it can be opened directly in Excel, Google Sheets, Python, or R.
+
 Each post includes a stable Instagram `shortcode`, which is usually the best join key when combining this export with your own Instagram data.
+
+## Sharing This Project
+
+Another person can use the repo by running:
+
+```bash
+git clone REPO_URL
+cd instalytics
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/instaloader --login THEIR_INSTAGRAM_USERNAME
+.venv/bin/python instagram_scraper.py --session-user THEIR_INSTAGRAM_USERNAME --max-posts 25 --max-comments 0 --output output/instagram.json --csv-output output/instagram.csv
+```
+
+They should use their own Instagram account and session.
+
+## Privacy And Local Files
+
+Do not commit:
+
+- `.env` files
+- Instagram passwords
+- Instaloader session files
+- Generated files in `output/`
+
+`.gitignore` excludes common local credential/session/output artifacts.
 
 ## Practical Limits
 
-- Instagram may rate limit or challenge requests, especially for large exports.
-- Comments can be slow and may require login.
-- If Instagram rejects the comments endpoint, the export continues and leaves `comments` empty for affected posts. Use `--max-comments 0` when you only need profile and post-level metrics.
-- Public share counts are not available through this script.
+- Instagram may rate limit, challenge, or block requests.
+- Private profiles only work if your logged-in account can already view them.
+- Comments may be unavailable even when post metadata works.
+- Public per-post share counts are not reliably exposed through this access path.
 - Media URLs are remote Instagram CDN URLs and may expire.
